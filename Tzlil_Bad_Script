@@ -1,0 +1,254 @@
+import pandas
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+import itertools
+import random
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+def is_human(x,sentence):
+    return (x in sentence)
+import glob
+path = "data/train/*.jpg" # TODO - UPDATE ME!
+path_test_w = "data/test_w/*.jpg" # TODO - UPDATE ME!
+path_test_m = "data/test_m/*.jpg" # TODO - UPDATE ME!
+images = {}
+for file in glob.glob(path):
+    filename = file.split("/")[-1]   # get the name of the .jpg file
+    img = plt.imread(file)           # read the image as a numpy array
+    images[filename] = img[:, :, :3]/255-0.5 # remove the alpha channel
+images_w = {}
+for file in glob.glob(path_test_w):
+    filename = file.split("/")[-1]   # get the name of the .jpg file
+    img = plt.imread(file)           # read the image as a numpy array
+    images_w[filename] = img[:, :, :3]/255-0.5 # remove the alpha channel
+images_m = {}
+for file in glob.glob(path_test_m):
+    filename = file.split("/")[-1]   # get the name of the .jpg file
+    img = plt.imread(file)           # read the image as a numpy array
+    images_m[filename] = img[:, :, :3]/255-0.5 # remove the alpha channel
+people = []
+for i in range(0,9):
+  people.append(list(filter(lambda x : "u00{}".format(i) in x,images.keys())))
+for i in range(10,100):
+  people.append(list(filter(lambda x : "u0{}".format(i) in x,images.keys())))
+for i in range(100,134):
+  people.append(list(filter(lambda x : "u{}".format(i) in x,images.keys())))
+people = [sorted(sorted(x, key=(lambda x:x[7:12]=="right")),key=(lambda x:x[5])) for x in people if len(x)>0]
+train=np.ndarray(shape=(len(people),3,2,224,224,3))
+for i,pep in enumerate(people):
+  for j in range(3):
+    for s in range(2):
+      train[i][j][s]=images[pep[2*j+s]]
+split_index = int(len(people)*0.8)
+train_data, valid_data = np.split(train,[split_index])
+
+def generate_same_pair(data):
+    sh = data.shape
+    # create target array to fill
+    res = np.ndarray(shape=(sh[0] * sh[1], 448, 224, 3))
+    i = 0
+    # iterate over the data
+    for pep in data:
+        for j in range(3):
+            # concate the left and right shoe
+            res[i] = np.concatenate((pep[j][0], pep[j][1]), axis=0)
+            i += 1
+    return res
+
+
+def generate_different_pair(data):
+  sh=data.shape
+  res=np.ndarray(shape=(sh[0]*sh[1],448,224,3))
+  i=0
+  pairs = list(itertools.product([0, 1, 2], repeat=2))
+  pairs=[pair for pair in pairs if pair[0]!=pair[1]]
+  for pep in data:
+    temp=random.sample(pairs, 3)
+    for j in range(3):
+      res[i]=np.concatenate((pep[temp[j][0]][0],pep[temp[j][1]][1]),axis=0)
+      i+=1
+  return res
+
+
+class CNN(nn.Module):
+    def __init__(self, n=4,kernel_len=3):
+        super(CNN, self).__init__()
+        self.input_size = 448*224
+        self.n_feature = n
+        self.kernel_size = kernel_len
+        self.conv1 = nn.Conv2d(in_channels = 3, out_channels = n, kernel_size=kernel_len,padding=(kernel_len-1)//2)
+        self.conv2 = nn.Conv2d(in_channels = n, out_channels = 2*n, kernel_size=kernel_len,padding=(kernel_len-1)//2)
+        self.conv3 = nn.Conv2d(in_channels = 2*n, out_channels=4*n, kernel_size = kernel_len,padding=(kernel_len-1)//2)
+        self.conv4 = nn.Conv2d(in_channels = 4*n, out_channels=8*n, kernel_size = kernel_len,padding=(kernel_len-1)//2)
+        self.fc1 = nn.Linear(8*n*28*14,100)
+        self.fc2 = nn.Linear(100,2)
+        # TODO: complete this method
+    def forward(self,x):
+      x = self.conv1(x)
+      x = F.max_pool2d(x,kernel_size=2)
+      x = self.conv2(x)
+      x = F.max_pool2d(x,kernel_size=2)
+      x = self.conv3(x)
+      x = F.max_pool2d(x,kernel_size=2)
+      x = self.conv4(x)
+      x = F.max_pool2d(x,kernel_size=2)
+      x = x.reshape([-1, self.n_feature * 8 * 28 * 14])
+      x = self.fc1(x)
+      #Maybe add an activation
+      x = F.relu(x)
+      x = self.fc2(x)
+      return x
+      # TODO: complete this class
+
+class CNNChannel(nn.Module):
+    def __init__(self, n=4,kernel_len=3):
+        super(CNNChannel, self).__init__()
+        self.input_size = 224*224
+        self.n_feature = n
+        self.conv1 = nn.Conv2d(in_channels = 6, out_channels = n, kernel_size=kernel_len,padding=(kernel_len-1)//2)
+        self.conv2 = nn.Conv2d(in_channels = n, out_channels = 2*n, kernel_size=kernel_len,padding=(kernel_len-1)//2)
+        self.conv3 = nn.Conv2d(in_channels = 2*n, out_channels=4*n, kernel_size = kernel_len,padding=(kernel_len-1)//2)
+        self.pooler = nn.MaxPool2d(kernel_size=2)
+        self.conv4 = nn.Conv2d(in_channels = 4*n, out_channels=8*n, kernel_size = kernel_len,padding=(kernel_len-1)//2)
+        self.fc1 = nn.Linear(8*n*14*14,100)
+        self.fc2 = nn.Linear(100,2)
+        #self.fc1 = nn.Linear(8*n*14*14,100)
+        # TODO: complete this method
+    def forward(self,x):
+      x = torch.cat(torch.split(x,224,dim=2),1)
+      x = self.conv1(x)
+      x = self.pooler(x)
+      x = self.conv2(x)
+      x = self.pooler(x)
+      x = self.conv3(x)
+      x = F.max_pool2d(x,kernel_size=2)
+      x = self.conv4(x)
+      x = self.pooler(x)
+      x = x.reshape([-1, self.n_feature * 8 * 14 * 14])
+      x = self.fc1(x)
+      #Maybe add an activation
+      x = F.relu(x)
+      x = self.fc2(x)
+      return x
+
+
+def get_accuracy(model, data, batch_size=50):
+    """Compute the model accuracy on the data set. This function returns two
+    separate values: the model accuracy on the positive samples,
+    and the model accuracy on the negative samples.
+
+    Example Usage:
+
+    >>> model = CNN() # create untrained model
+    >>> pos_acc, neg_acc= get_accuracy(model, valid_data)
+    >>> false_positive = 1 - pos_acc
+    >>> false_negative = 1 - neg_acc
+    """
+
+    model.eval()
+    n = data.shape[0]
+
+    data_pos = generate_same_pair(data)  # should have shape [n * 3, 448, 224, 3]
+    data_neg = generate_different_pair(data)  # should have shape [n * 3, 448, 224, 3]
+
+    pos_correct = 0
+    for i in range(0, len(data_pos), batch_size):
+        xs = torch.Tensor(data_pos[i:i + batch_size]).transpose(1, 3).transpose(2, 3)
+        zs = model(xs)
+        pred = zs.max(1, keepdim=True)[1]  # get the index of the max logit
+        pred = pred.detach().numpy()
+        pos_correct += (pred == 1).sum()
+
+    neg_correct = 0
+    for i in range(0, len(data_neg), batch_size):
+        xs = torch.Tensor(data_neg[i:i + batch_size]).transpose(1, 3).transpose(2, 3)
+        zs = model(xs)
+        pred = zs.max(1, keepdim=True)[1]  # get the index of the max logit
+        pred = pred.detach().numpy()
+        neg_correct += (pred == 0).sum()
+
+    return pos_correct / (n * 3), neg_correct / (n * 3)
+
+
+
+# Write your code here
+def shuffle(data):
+  shuffled_indices = list(range(len(data)))
+  random.shuffle(shuffled_indices)
+  return [data[i] for i in shuffled_indices]
+
+
+
+
+def train_model(model, train_data,  val_data, learning_rate=0.01,batch_size=32, weight_decay=0.2, epochs=100):
+ # model.train()
+
+  criterion = nn.CrossEntropyLoss()
+  optimizer = optim.Adam(model.parameters(),lr=learning_rate,weight_decay=weight_decay)
+
+  positive_train_data = generate_same_pair(train_data)
+  negative_train_data = generate_different_pair(train_data)
+
+
+  pos_train_data = shuffle(positive_train_data)
+  neg_train_data = shuffle(negative_train_data)
+
+  for epoch in range(epochs):
+        epoch_loss, epoch_acc = 0.0, 0.0
+        # shuffle the positive and negative training data before each epoch
+
+        #Train the model
+        model.train()
+    # iterate over the batches of positive and negative training data
+        for i in range(0,positive_train_data.shape[0],batch_size**3):
+          # zero the gradients
+          if (i + batch_size//2) > positive_train_data.shape[0]:
+                break
+          false_batch=neg_train_data[i:i+(batch_size//2)]
+          true_batch=pos_train_data[i:i+(batch_size//2)]
+          inputs = torch.cat((torch.tensor(true_batch), torch.tensor(false_batch)), dim=0).transpose(1,3).transpose(2,3)
+          mat1 = np.zeros((batch_size//2,2))
+          mat1[:,0] = 1
+          mat2 = np.zeros((batch_size//2,2))
+          mat2[:,1] = 1
+          labels = torch.cat((torch.tensor(mat2), torch.tensor(mat1)),dim=0)
+
+          # move the inputs and labels to the correct device
+          inputs = inputs.to(device)
+          labels = labels.to(device)
+          print(labels)
+          outputs = model(inputs.float())
+          print(outputs)
+          ##wait for 2 sec
+          time.sleep(2)
+          loss = criterion(outputs, labels)
+         # acc = accuracy(model, outputs, labels)
+
+          # backward pass and optimization step
+          loss.backward()
+          optimizer.step()
+          optimizer.zero_grad()
+          # add the loss and accuracy to the epoch loss and accuracy
+          epoch_loss += loss.item()
+
+        train_cost = float(loss.detach().numpy())
+
+        train_acc_pos,train_acc_neg = get_accuracy(model,train_data,len(train_data))
+        valid_acc_pos,valid_acc_neg = get_accuracy(model,val_data,len(val_data))
+        print("Train Epoch : {} [Train Positive: {},Train Negative:{}] [Validation Positive: {}, Validation Negative: {}] and Loss : {}".format(epoch,train_acc_pos*100,train_acc_neg*100,valid_acc_pos*100,valid_acc_neg*100,train_cost))
+
+
+
+model = CNNChannel()
+#print(train_data[0:5])
+a,b = get_accuracy(model,train_data[0:5],batch_size=5)
+print(a,b)
+print(train_data.shape)
+train_model(model,train_data[0:2], valid_data,batch_size=2)
+
